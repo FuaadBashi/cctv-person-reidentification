@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Outputs / datasets
+outputs/
+data/
+*.mp4
+*.mov
+*.avi
+*.tar.xz
+*.zip
