@@ -2,93 +2,126 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
-import time
-
 import numpy as np
 
 
+def _l2_normalize(x: np.ndarray) -> np.ndarray:
+    x = x.astype(np.float32, copy=False)
+    n = float(np.linalg.norm(x) + 1e-12)
+    return x / n
+
+
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    a = a.astype(np.float32)
-    b = b.astype(np.float32)
-    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
-    return float(1.0 - (np.dot(a, b) / denom))
+    a = _l2_normalize(a)
+    b = _l2_normalize(b)
+    # cosine distance = 1 - cosine similarity
+    return float(1.0 - np.clip(np.dot(a, b), -1.0, 1.0))
 
 
 @dataclass
-class IdentityRecord:
-    gid: int
-    created_ts: float
-    last_seen_ts: float
-    face_proto: Optional[np.ndarray] = None
-    body_proto: Optional[np.ndarray] = None
-    face_count: int = 0
-    body_count: int = 0
+class MatchResult:
+    gid: Optional[int]
+    best_dist: float
+    second_dist: float
 
 
 class IdentityGallery:
-    def __init__(self, max_size: int = 2000):
+    """
+    Stores a rolling gallery of embeddings per global identity (GID).
+    We keep separate face and body banks so we can match using either modality.
+    """
+
+    def __init__(self, max_size: int = 200):
         self.max_size = int(max_size)
-        self._gid_next = 1
-        self.records: Dict[int, IdentityRecord] = {}
+        self._faces: Dict[int, List[np.ndarray]] = {}
+        self._bodies: Dict[int, List[np.ndarray]] = {}
 
-    def new_identity(self) -> int:
-        if len(self.records) >= self.max_size:
-            oldest_gid = min(self.records.values(), key=lambda r: r.last_seen_ts).gid
-            del self.records[oldest_gid]
-        gid = self._gid_next
-        self._gid_next += 1
-        now = time.time()
-        self.records[gid] = IdentityRecord(gid=gid, created_ts=now, last_seen_ts=now)
-        return gid
+    def add_face(self, gid: int, emb: np.ndarray) -> None:
+        if emb is None or emb.size == 0:
+            return
+        emb = _l2_normalize(emb)
+        bank = self._faces.setdefault(gid, [])
+        bank.append(emb)
+        if len(bank) > self.max_size:
+            del bank[0 : len(bank) - self.max_size]
 
-    def touch(self, gid: int) -> None:
-        if gid in self.records:
-            self.records[gid].last_seen_ts = time.time()
+    def add_body(self, gid: int, emb: np.ndarray) -> None:
+        if emb is None or emb.size == 0:
+            return
+        emb = _l2_normalize(emb)
+        bank = self._bodies.setdefault(gid, [])
+        bank.append(emb)
+        if len(bank) > self.max_size:
+            del bank[0 : len(bank) - self.max_size]
 
-    def _update_proto(self, proto: Optional[np.ndarray], count: int, emb: np.ndarray) -> Tuple[np.ndarray, int]:
-        emb = emb.astype(np.float32)
-        if proto is None:
-            return emb, 1
-        n = count + 1
-        return (proto * count + emb) / n, n
+    def match_face(self, emb: np.ndarray) -> MatchResult:
+        return self._match(emb, self._faces)
 
-    def update_face(self, gid: int, emb: np.ndarray) -> None:
-        rec = self.records[gid]
-        rec.last_seen_ts = time.time()
-        rec.face_proto, rec.face_count = self._update_proto(rec.face_proto, rec.face_count, emb)
+    def match_body(self, emb: np.ndarray) -> MatchResult:
+        return self._match(emb, self._bodies)
 
-    def update_body(self, gid: int, emb: np.ndarray) -> None:
-        rec = self.records[gid]
-        rec.last_seen_ts = time.time()
-        rec.body_proto, rec.body_count = self._update_proto(rec.body_proto, rec.body_count, emb)
+    def _match(self, emb: np.ndarray, store: Dict[int, List[np.ndarray]]) -> MatchResult:
+        if emb is None or emb.size == 0 or len(store) == 0:
+            return MatchResult(None, 1e9, 1e9)
 
-    def best_match_face(self, emb: np.ndarray) -> Tuple[Optional[int], float]:
-        best_gid, best_d = None, 1e9
-        for gid, rec in self.records.items():
-            if rec.face_proto is None:
+        emb = _l2_normalize(emb)
+
+        best_gid: Optional[int] = None
+        best = 1e9
+        second = 1e9
+
+        for gid, bank in store.items():
+            if not bank:
                 continue
-            d = cosine_distance(emb, rec.face_proto)
-            if d < best_d:
-                best_gid, best_d = gid, d
-        return best_gid, best_d
+            # nearest neighbour within that GID bank
+            d = min(cosine_distance(emb, e) for e in bank)
 
-    def best_match_body(self, emb: np.ndarray) -> Tuple[Optional[int], float]:
-        best_gid, best_d = None, 1e9
-        for gid, rec in self.records.items():
-            if rec.body_proto is None:
-                continue
-            d = cosine_distance(emb, rec.body_proto)
-            if d < best_d:
-                best_gid, best_d = gid, d
-        return best_gid, best_d
+            if d < best:
+                second = best
+                best = d
+                best_gid = gid
+            elif d < second:
+                second = d
+
+        return MatchResult(best_gid, best, second)
 
 
 class IdentityManager:
-    def __init__(self, gallery: IdentityGallery, face_dist_thresh: float = 0.35, body_dist_thresh: float = 0.45):
+    """
+    Assigns a stable global identity (GID) to transient tracker IDs (TID).
+
+    Matching logic:
+      1) If TID already has a GID -> keep it ("existing")
+      2) If face embedding available -> face match if dist <= face_thresh
+      3) Else body embedding -> body match if dist <= body_thresh AND (second-best - best) >= body_margin
+      4) Else create new GID
+    """
+
+    def __init__(
+        self,
+        gallery: IdentityGallery,
+        face_thresh: Optional[float] = None,
+        body_thresh: Optional[float] = None,
+        body_margin: float = 0.0,
+        face_latch_frames: int = 0,  # kept for config compatibility; latch is handled in pipeline UI
+        # Backward-compatible aliases (if older code calls these):
+        face_dist_thresh: Optional[float] = None,
+        body_dist_thresh: Optional[float] = None,
+    ):
         self.gallery = gallery
-        self.face_dist_thresh = float(face_dist_thresh)
-        self.body_dist_thresh = float(body_dist_thresh)
+
+        # Accept either naming style
+        if face_thresh is None:
+            face_thresh = face_dist_thresh if face_dist_thresh is not None else 0.55
+        if body_thresh is None:
+            body_thresh = body_dist_thresh if body_dist_thresh is not None else 0.40
+
+        self.face_thresh = float(face_thresh)
+        self.body_thresh = float(body_thresh)
+        self.body_margin = float(body_margin)
+
         self.track_to_gid: Dict[int, int] = {}
+        self._next_gid = 1
 
     def assign_gid(
         self,
@@ -96,38 +129,42 @@ class IdentityManager:
         face_emb: Optional[np.ndarray],
         body_emb: Optional[np.ndarray],
     ) -> Tuple[int, str, float]:
+        # If already assigned, keep stable identity
         if track_id in self.track_to_gid:
-            gid = self.track_to_gid[track_id]
-            self.gallery.touch(gid)
-            return gid, "existing", 0.0
+            return self.track_to_gid[track_id], "existing", 0.0
 
-        if face_emb is not None:
-            gid, d = self.gallery.best_match_face(face_emb)
-            if gid is not None and d <= self.face_dist_thresh:
-                self.track_to_gid[track_id] = gid
-                self.gallery.update_face(gid, face_emb)
-                return gid, "face_match", d
+        # 1) Face match (preferred)
+        if face_emb is not None and face_emb.size > 0:
+            m = self.gallery.match_face(face_emb)
+            if m.gid is not None and m.best_dist <= self.face_thresh:
+                self.track_to_gid[track_id] = m.gid
+                return m.gid, "face_match", float(m.best_dist)
 
-        if body_emb is not None:
-            gid, d = self.gallery.best_match_body(body_emb)
-            if gid is not None and d <= self.body_dist_thresh:
-                self.track_to_gid[track_id] = gid
-                self.gallery.update_body(gid, body_emb)
-                return gid, "body_match", d
+        # 2) Body match (fallback)
+        if body_emb is not None and body_emb.size > 0:
+            m = self.gallery.match_body(body_emb)
+            if m.gid is not None and m.best_dist <= self.body_thresh:
+                # margin test improves identity separation (reduces "sticky" wrong matches)
+                if (m.second_dist - m.best_dist) >= self.body_margin:
+                    self.track_to_gid[track_id] = m.gid
+                    return m.gid, "body_match", float(m.best_dist)
 
-        gid = self.gallery.new_identity()
+        # 3) New identity
+        gid = self._next_gid
+        self._next_gid += 1
         self.track_to_gid[track_id] = gid
-        if face_emb is not None:
-            self.gallery.update_face(gid, face_emb)
-        if body_emb is not None:
-            self.gallery.update_body(gid, body_emb)
         return gid, "new", 0.0
 
-    def update_embeddings(self, track_id: int, face_emb: Optional[np.ndarray], body_emb: Optional[np.ndarray]) -> None:
-        if track_id not in self.track_to_gid:
+    def update_embeddings(
+        self,
+        track_id: int,
+        face_emb: Optional[np.ndarray],
+        body_emb: Optional[np.ndarray],
+    ) -> None:
+        gid = self.track_to_gid.get(track_id)
+        if gid is None:
             return
-        gid = self.track_to_gid[track_id]
-        if face_emb is not None:
-            self.gallery.update_face(gid, face_emb)
-        if body_emb is not None:
-            self.gallery.update_body(gid, body_emb)
+        if face_emb is not None and face_emb.size > 0:
+            self.gallery.add_face(gid, face_emb)
+        if body_emb is not None and body_emb.size > 0:
+            self.gallery.add_body(gid, body_emb)

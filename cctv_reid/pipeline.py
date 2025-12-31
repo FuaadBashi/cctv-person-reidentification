@@ -10,12 +10,14 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
+from .visualize import to_gray_overlay, draw_box_with_label, gid_to_color, format_label
 from .config import PipelineConfig
+
 from .video_io import VideoReader, VideoWriter
 from .detector import PersonDetectorYOLO
+
 from .tracker import DeepSortTracker
 from .identity import IdentityGallery, IdentityManager
-from .visualize import to_gray_overlay, draw_box_with_label
 from .face import InsightFaceModule, FaceDet
 from .body_reid import ResNetBodyReID
 
@@ -49,29 +51,68 @@ class VideoReIDPipeline:
         self.cfg = cfg
         self.cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.detector = PersonDetectorYOLO(cfg.det_model, conf=cfg.det_conf, iou=cfg.det_iou)
+        # Core modules
+        self.detector = PersonDetectorYOLO(
+            cfg.det_model,
+            conf=cfg.det_conf,
+            iou=cfg.det_iou,
+            imgsz=getattr(cfg, "det_imgsz", 960),
+            min_full_dets=getattr(cfg, "det_min_full_dets", 1),
+            small_conf=getattr(cfg, "det_small_conf", 0.15),
+            small_imgsz=getattr(cfg, "det_small_imgsz", 1536),
+            tile_enabled=getattr(cfg, "det_tile_enabled", True),
+            tile_size=getattr(cfg, "det_tile_size", 960),
+            tile_overlap=getattr(cfg, "det_tile_overlap", 0.20),
+            tile_nms_iou=getattr(cfg, "det_tile_nms_iou", 0.50),
+        )
+
         self.tracker = DeepSortTracker(max_age=cfg.tracker_max_age, n_init=cfg.tracker_n_init)
 
-        self.face = InsightFaceModule() if cfg.face_enabled else None
-        # Body ReID fallback is a torchvision ResNet-50 appearance embedding.
-        self.body = ResNetBodyReID(device="cpu") if cfg.body_enabled else None
+        # Optional modules
+        self.face = InsightFaceModule() if getattr(cfg, "face_enabled", True) else None
+        self.body = ResNetBodyReID(device="cpu") if getattr(cfg, "body_enabled", True) else None
 
+        # Identity management
         self.gallery = IdentityGallery(max_size=cfg.max_gallery)
-        self.id_manager = IdentityManager(self.gallery, cfg.face_dist_thresh, cfg.body_dist_thresh)
+        self.id_manager = IdentityManager(
+            self.gallery,
+            face_thresh=cfg.face_dist_thresh,
+            body_thresh=cfg.body_dist_thresh,
+            body_margin=getattr(cfg, "body_margin", 0.0),
+            face_latch_frames=getattr(cfg, "face_latch_frames", 0),
+        )
 
+        # Outputs
         self.annotated_path = cfg.output_dir / "annotated.mp4"
         self.tracks_jsonl = JsonlWriter(cfg.output_dir / "tracks.jsonl")
         self.events_jsonl = JsonlWriter(cfg.output_dir / "events.jsonl")
         self.tracks_csv_path = cfg.output_dir / "tracks.csv"
 
         self._csv_file = self.tracks_csv_path.open("w", newline="", encoding="utf-8")
-        self._csv = csv.DictWriter(self._csv_file, fieldnames=[
-            "frame", "time_s", "track_id", "global_id", "x1", "y1", "x2", "y2", "conf",
-            "is_confirmed", "tsu", "has_face", "assign_reason", "assign_dist"
-        ])
+        self._csv = csv.DictWriter(
+            self._csv_file,
+            fieldnames=[
+                "frame",
+                "time_s",
+                "track_id",
+                "global_id",
+                "x1",
+                "y1",
+                "x2",
+                "y2",
+                "conf",
+                "is_confirmed",
+                "tsu",
+                "has_face",
+                "assign_reason",
+                "assign_dist",
+            ],
+        )
         self._csv.writeheader()
 
+        # Caches
         self._body_cache: Dict[int, Tuple[int, np.ndarray]] = {}
+        self._face_latch_until: Dict[int, int] = {}  # track_id -> last_frame_to_show_FACE
 
     def _log_event(self, kind: str, payload: dict) -> None:
         self.events_jsonl.write({"ts": time.time(), "kind": kind, **payload})
@@ -79,7 +120,7 @@ class VideoReIDPipeline:
     def run(self) -> None:
         cfg = self.cfg
         vr = VideoReader(cfg.input_path)
-        vw = VideoWriter(self.annotated_path, fps=vr.fps / cfg.stride, size=(vr.width, vr.height))
+        vw = VideoWriter(self.annotated_path, fps=vr.fps / max(1, cfg.stride), size=(vr.width, vr.height))
 
         pbar = tqdm(total=vr.frame_count, desc="Processing", unit="frame")
         alive_prev: set[int] = set()
@@ -98,11 +139,15 @@ class VideoReIDPipeline:
                 tracks = self.tracker.update(dets, frame_bgr=frame)
                 tracks_conf = [t for t in tracks if t.is_confirmed and t.time_since_update == 0]
 
+                # Face detection/assignment (optional)
                 face_map: Dict[int, FaceDet] = {}
                 if self.face is not None and (frame_idx % max(1, cfg.face_every) == 0):
                     faces = self.face.detect(frame)
-                    face_map = self.face.assign_faces_to_tracks(faces, {t.track_id: t.bbox_xyxy for t in tracks_conf})
+                    face_map = self.face.assign_faces_to_tracks(
+                        faces, {t.track_id: t.bbox_xyxy for t in tracks_conf}
+                    )
 
+                # EXIT events when a confirmed track disappears
                 current_alive = {t.track_id for t in tracks_conf}
                 dead = alive_prev - current_alive
                 for tid in dead:
@@ -116,8 +161,17 @@ class VideoReIDPipeline:
 
                 for t in tracks_conf:
                     tid = t.track_id
-                    face_emb = face_map.get(tid).embedding if tid in face_map else None
 
+                    # Face embedding if present this frame
+                    fd = face_map.get(tid)
+                    face_emb = fd.embedding if fd is not None else None
+
+                    # FACE latch (UI only): keep FACE for N frames after last detection
+                    if face_emb is not None:
+                        self._face_latch_until[tid] = frame_idx + int(getattr(cfg, "face_latch_frames", 0))
+                    display_has_face = (face_emb is not None) or (frame_idx <= self._face_latch_until.get(tid, -1))
+
+                    # Body embedding (optional, cached every body_every frames)
                     body_emb: Optional[np.ndarray] = None
                     if self.body is not None:
                         cached = self._body_cache.get(tid)
@@ -130,22 +184,28 @@ class VideoReIDPipeline:
                         else:
                             body_emb = cached[1]
 
+                    # Assign / re-identify
                     gid, reason, dist = self.id_manager.assign_gid(tid, face_emb, body_emb)
                     self.id_manager.update_embeddings(tid, face_emb, body_emb)
 
+                    # ENTER_OR_MATCH event when a track is first assigned or matched
                     if reason in {"new", "face_match", "body_match"}:
-                        self._log_event("ENTER_OR_MATCH", {
-                            "frame": frame_idx,
-                            "time_s": time_s,
-                            "track_id": tid,
-                            "global_id": gid,
-                            "reason": reason,
-                            "distance": dist,
-                            "has_face": face_emb is not None,
-                        })
+                        self._log_event(
+                            "ENTER_OR_MATCH",
+                            {
+                                "frame": frame_idx,
+                                "time_s": time_s,
+                                "track_id": tid,
+                                "global_id": gid,
+                                "reason": reason,
+                                "distance": dist,
+                                "has_face": face_emb is not None,
+                            },
+                        )
 
-                    label = f"GID {gid} | T{tid}" + (" | FACE" if face_emb is not None else "")
-                    draw_box_with_label(annotated, t.bbox_xyxy, label)
+                    label = format_label(gid, tid, display_has_face)
+                    color = gid_to_color(gid)
+                    draw_box_with_label(annotated, t.bbox_xyxy, label, color=color)
 
                     x1, y1, x2, y2 = t.bbox_xyxy
                     rec = {
@@ -163,19 +223,24 @@ class VideoReIDPipeline:
                     }
                     per_frame_records.append(rec)
 
-                    self._csv.writerow({
-                        "frame": frame_idx,
-                        "time_s": time_s,
-                        "track_id": tid,
-                        "global_id": gid,
-                        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                        "conf": t.confidence,
-                        "is_confirmed": int(t.is_confirmed),
-                        "tsu": t.time_since_update,
-                        "has_face": int(face_emb is not None),
-                        "assign_reason": reason,
-                        "assign_dist": dist,
-                    })
+                    self._csv.writerow(
+                        {
+                            "frame": frame_idx,
+                            "time_s": time_s,
+                            "track_id": tid,
+                            "global_id": gid,
+                            "x1": x1,
+                            "y1": y1,
+                            "x2": x2,
+                            "y2": y2,
+                            "conf": t.confidence,
+                            "is_confirmed": int(t.is_confirmed),
+                            "tsu": t.time_since_update,
+                            "has_face": int(face_emb is not None),
+                            "assign_reason": reason,
+                            "assign_dist": dist,
+                        }
+                    )
 
                 self.tracks_jsonl.write({"frame": frame_idx, "time_s": time_s, "tracks": per_frame_records})
                 vw.write(annotated)
