@@ -1,174 +1,117 @@
-# CCTV Person Re-Identification Prototype (Single Camera)
+# CCTV Person Re-Identification — Single-Camera Tracking Prototype
 
-A practical, end-to-end **single-camera** computer vision pipeline that performs **person detection**, **multi-object tracking**, and **re-identification (ReID)** using appearance embeddings to maintain identity continuity over time.
+Maintains stable person identities across frames and through occlusions by combining YOLO detection, DeepSORT motion tracking, and a PyTorch appearance-embedding gallery. Exports annotated video plus structured audit logs so that every identity decision is inspectable after the fact.
 
-The system produces an **annotated output video** plus **structured run artifacts** (CSV/JSONL) designed for debugging, auditing, and downstream analytics.
-
-> **Focus:** Single-camera identity continuity (not cross-camera identity linking).
+The hard part of single-camera re-ID is not detection. It is what happens when a person walks behind a pillar for two seconds: DeepSORT's Kalman filter loses the track, and a naive pipeline assigns a fresh ID on re-emergence. Appearance embeddings are what close that gap.
 
 ---
 
-## 🚀 Why This Project Matters
-
-Recruiters often see computer vision work as "a notebook demo." This project is packaged as an engineering prototype:
-
-* **CLI-driven execution** suitable for batch runs and reproducibility.
-* **Structured logs** (`tracks.csv`, `events.jsonl`) for Detections + Tracks + Events.
-* **Annotated video output** for quick visual verification.
-* **Configuration-friendly** thresholds for detection, tracking, and ReID behavior.
-
----
-
-## ✨ Key Features
-
-* **Person Detection:** Powered by the YOLO-family of detectors.
-* **Robust Tracking:** DeepSORT-style tracker for stable IDs across frames.
-* **Re-identification (ReID):** Uses appearance embeddings + cosine similarity matching to reduce ID switches.
-* **Structured Telemetry:**
-* `tracks.csv`: Frame-level tracking table for Pandas/Excel analysis.
-* `events.jsonl`: Identity lifecycle events (appear, disappear, merge).
-
-
-* **Visualizations:** Annotated video export with bounding boxes and track IDs.
-* **Developer Friendly:** Optional live preview (`--show`) and repeatable CLI runs.
-
----
-
-## 🏗 High-Level Architecture
-
-1. **Detector:** Finds people per frame (bounding boxes + confidence).
-2. **Tracker:** Links detections over time using motion (Kalman Filter) and appearance cues.
-3. **ReID:** Computes embeddings to mitigate ID switches during occlusions.
-4. **Exporter:** Writes annotated video, track tables, and event streams.
-
----
-
-## 📁 Repository Structure
-
-```text
-.
-├── run.py                # Main entry point
-├── requirements.txt      # Project dependencies
-├── README.md
-├── configs/
-│   └── default.yaml      # Thresholds and model parameters
-├── src/
-│   ├── detection.py      # YOLO detector wrapper
-│   ├── tracking.py       # Multi-object tracking logic
-│   ├── reid.py           # Feature extraction & similarity
-│   ├── io_utils.py       # CSV/JSONL logging helpers
-│   └── viz.py            # OpenCV drawing utilities
-└── outputs/              # Generated artifacts per run
-    └── <run_name>/
-        ├── annotated.mp4
-        ├── tracks.csv
-        └── events.jsonl
+## Architecture
 
 ```
+frame ──► YOLO detection ──► DeepSORT (Kalman + IoU association)
+                                   │
+                          track confirmed?
+                              │        │
+                            yes        no / occluded
+                              │        │
+                              │        ▼
+                              │   appearance embedding ──► gallery cosine match
+                              │        │                        │
+                              │        │              above threshold? reuse ID
+                              ▼        ▼
+                        ┌─────────────────────┐
+                        │  annotated video    │
+                        │  tracks.csv         │
+                        │  events.jsonl       │
+                        └─────────────────────┘
+```
 
----
+- **Detection** — YOLO, confidence-thresholded.
+- **Motion association** — DeepSORT: Kalman prediction plus IoU matching handles the frame-to-frame case cheaply.
+- **Appearance re-association** — a PyTorch embedding model maintains a gallery of feature vectors per identity. When a track is lost and a new detection appears, cosine similarity against the gallery decides whether it is a returning person or a genuinely new one.
+- **Audit trail** — every association decision is logged, so an ID switch can be traced to the frame and the similarity score that caused it.
 
-## 🛠 Getting Started
+## Results
 
-### Prerequisites
+| Metric | Value |
+|---|---|
+| ID switches | `[FILL]` |
+| MOTA | `[FILL]` |
+| IDF1 | `[FILL]` |
+| Tracking FPS | `[FILL]` |
+| Test footage | `[FILL: source, duration, resolution, approx. person count]` |
 
-* Python 3.9+
-* macOS, Linux, or Windows
-* (Optional) CUDA-enabled GPU for faster inference
-* [FFmpeg](https://ffmpeg.org/) for robust video encoding
+`[If you have not computed MOTA/IDF1, either run py-motmetrics against a labelled clip or delete this table entirely and describe the qualitative behaviour instead. An empty metrics table is worse than no table — and an unlabelled number is worse than both.]`
 
-### Installation
+### Threshold sensitivity
+
+The ReID similarity threshold is the main tuning knob and it trades the two failure modes against each other:
+
+| Threshold | Failure mode |
+|---|---|
+| Too low | Identity **merges** — two different people collapse into one ID |
+| Too high | Identity **fragments** — one person picks up a new ID after every occlusion |
+
+`[FILL: the value you settled on and what you observed on either side of it. This is the single most interview-relevant paragraph in the repo — it shows you tuned deliberately rather than accepting a default.]`
+
+## Usage
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/cctv-reid-prototype.git
-cd cctv-reid-prototype
-
-# Setup virtual environment
-python -m venv .venv
-source .venv/bin/activate  # macOS/Linux
-# .venv\Scripts\activate   # Windows
-
-# Install dependencies
 pip install -r requirements.txt
 
+python track.py \
+    --source footage.mp4 \
+    --conf 0.5 \
+    --iou 0.45 \
+    --reid-threshold 0.7 \
+    --out results/
 ```
 
----
+`[ADJUST to your actual CLI flags.]`
 
-## 🚦 Usage
+### Outputs
 
-### Quick Start
+**`tracks.csv`** — one row per detection per frame:
 
-Run the pipeline on a sample video with a live preview:
-
-```bash
-python run.py --input video.mp4 --output_dir outputs/run_01 --show
-
+```csv
+frame,track_id,x1,y1,x2,y2,confidence,reid_similarity
+1,1,320,140,410,480,0.94,
+48,1,512,138,604,479,0.91,0.83
 ```
 
-### Common CLI Arguments
-
-| Argument | Description | Default |
-| --- | --- | --- |
-| `--input` | Path to input video file | None |
-| `--output_dir` | Destination for artifacts | `outputs/` |
-| `--conf` | Detector confidence threshold | `0.40` |
-| `--reid_thresh` | Similarity threshold for ReID matching | `0.60` |
-| `--max_age` | Frames to keep a "lost" track active | `30` |
-| `--device` | Inference hardware (`cpu` or `cuda`) | `cpu` |
-
----
-
-## 📊 Outputs & Telemetry
-
-Inside your chosen output directory, the pipeline produces:
-
-**1. `annotated.mp4**`
-Rendered video with bounding boxes, track IDs, and state indicators.
-
-**2. `tracks.csv**`
-A frame-by-frame data table. Perfect for downstream data science tasks.
-
-* **Columns:** `frame`, `track_id`, `x1`, `y1`, `x2`, `y2`, `det_conf`, `state`.
-
-**3. `events.jsonl**`
-A JSON Lines event stream for auditing identity lifecycle changes.
+**`events.jsonl`** — one record per identity lifecycle event:
 
 ```json
-{"t": 12.40, "event": "track_started", "track_id": 7, "bbox": [100, 200, 150, 300], "conf": 0.86}
-{"t": 15.10, "event": "id_switch_mitigated", "old_id": 7, "new_id": 9}
-
+{"frame": 48, "event": "reid_match", "track_id": 1, "similarity": 0.83, "gap_frames": 19}
+{"frame": 92, "event": "track_lost", "track_id": 3, "last_seen": 91}
 ```
 
----
+## Repo layout
 
-## 🧠 How ReID Works
+```
+├── track.py              # main CLI pipeline
+├── src/
+│   ├── detector.py       # YOLO wrapper
+│   ├── tracker.py        # DeepSORT integration
+│   └── reid.py           # embedding model + gallery matching
+├── results/              # sample outputs — commit a short clip's logs
+└── requirements.txt
+```
 
-The ReID component utilizes a lightweight convolutional neural network to produce **appearance embeddings**. For each confirmed track, the system maintains a gallery of features. When a track is lost and a new detection appears nearby, the system calculates the **cosine similarity** between the new detection and the gallery to decide if it is a returning individual, significantly reducing fragmentation caused by short-term occlusions.
+## Limitations
 
----
+- **Single camera only.** No cross-camera re-identification; the gallery is not shared across views and appearance embeddings do not transfer across differing lighting and camera geometry without domain adaptation.
+- Appearance matching degrades when people wear similar clothing — the embedding has little to separate two people in the same uniform.
+- Prototype throughput, not optimised for real-time deployment at scale.
+- Evaluated on `[FILL]` footage only; behaviour on crowded scenes with heavy mutual occlusion is untested.
 
-## 🛡 Privacy & Responsible Use
+## Ethical and legal note
 
-This prototype is intended for legitimate security and operations use cases.
+Person re-identification is surveillance technology. Deployment against real people is regulated — in the UAE by Federal Decree-Law No. 45 of 2021 on Personal Data Protection, in the EU by GDPR Article 9, which treats biometric data used for unique identification as a special category requiring an explicit lawful basis.
 
-* Avoid storing unnecessary personal data.
-* Ensure compliance with local privacy and surveillance regulations (e.g., GDPR).
-* Follow strict access controls for generated output artifacts.
+This is a technical prototype built on `[FILL: public benchmark / self-recorded / synthetic]` footage. It is not intended for deployment against real individuals without a lawful basis, a data protection impact assessment, and appropriate retention limits.
 
----
+## Licence
 
-## 🛠 Tech Stack
-
-* **Language:** Python
-* **CV Library:** OpenCV
-* **Deep Learning:** PyTorch
-* **Models:** YOLO (Detection), DeepSORT/ByteTrack (Tracking)
-* **Data Science:** NumPy, Pandas
-
----
-
-## 📜 License
-
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT — see [LICENSE](LICENSE).
