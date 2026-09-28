@@ -11,3 +11,10 @@ data/
 *.avi
 *.tar.xz
 *.zip
+
+# Model weights are downloaded on first use
+*.pt
+*.onnx
+# Run outputs
+results/
+runs/

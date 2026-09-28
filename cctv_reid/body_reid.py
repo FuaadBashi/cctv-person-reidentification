@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Body re-identification (appearance embedding).
 
 This project originally attempted to use `torchreid.utils.FeatureExtractor`,
@@ -17,14 +15,15 @@ Notes:
   - Embeddings are L2-normalised for cosine distance matching.
 """
 
+from __future__ import annotations
+
 from typing import Optional
 
-import numpy as np
 import cv2
-
+import numpy as np
 import torch
 import torchvision.transforms as T
-from torchvision.models import resnet50, ResNet50_Weights
+from torchvision.models import ResNet50_Weights, resnet50
 
 
 def _to_rgb(img_bgr: np.ndarray) -> np.ndarray:
@@ -67,5 +66,5 @@ class ResNetBodyReID:
             feat = self.model(x).squeeze(0).detach().cpu().numpy().astype(np.float32)
 
         # L2 normalise
-        feat /= (np.linalg.norm(feat) + 1e-12)
+        feat /= np.linalg.norm(feat) + 1e-12
         return feat
