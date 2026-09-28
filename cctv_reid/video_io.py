@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import cv2
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Tuple
+
+import cv2
 
 
 @dataclass(frozen=True)

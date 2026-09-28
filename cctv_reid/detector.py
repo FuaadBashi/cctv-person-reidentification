@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import List, Optional, Tuple
+
 import numpy as np
-from ultralytics import YOLO
-import cv2
-from dataclasses import dataclass
-from typing import Tuple
+
 
 @dataclass
 class Detection:
@@ -16,6 +14,7 @@ class Detection:
     confidence: detection confidence
     feature: optional appearance embedding
     """
+
     bbox_xyxy: Tuple[float, float, float, float]
     confidence: float
     feature: Optional[np.ndarray] = None
@@ -30,7 +29,6 @@ class Det:
     @property
     def conf(self) -> float:
         return self.confidence
-
 
 
 def _iou_xyxy(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -77,6 +75,26 @@ def _nms_xyxy(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> List[int
     return keep
 
 
+def tile_coords(W: int, H: int, tile_size: int, overlap: float) -> List[Tuple[int, int, int, int]]:
+    """Overlapping square tiles covering a W x H frame, as (x1, y1, x2, y2).
+
+    The last row and column are shifted flush with the right and bottom edges, so every pixel
+    is covered even when the frame size isn't a multiple of the step.
+    """
+    ts = tile_size
+    ov = max(0.0, min(0.5, overlap))
+    step = max(1, int(round(ts * (1.0 - ov))))
+
+    xs = list(range(0, max(1, W - ts + 1), step)) or [0]
+    ys = list(range(0, max(1, H - ts + 1), step)) or [0]
+    if xs[-1] != max(0, W - ts):
+        xs.append(max(0, W - ts))
+    if ys[-1] != max(0, H - ts):
+        ys.append(max(0, H - ts))
+
+    return [(x0, y0, min(W, x0 + ts), min(H, y0 + ts)) for y0 in ys for x0 in xs]
+
+
 class PersonDetectorYOLO:
     """
     Person detector with a safe "small person rescue" mode:
@@ -100,6 +118,10 @@ class PersonDetectorYOLO:
         tile_overlap: float = 0.20,
         tile_nms_iou: float = 0.50,
     ):
+        # Imported here so the geometry helpers above can be used (and tested) without
+        # installing Ultralytics and PyTorch.
+        from ultralytics import YOLO
+
         self.model = YOLO(model_name)
         self.conf = float(conf)
         self.iou = float(iou)
@@ -134,37 +156,12 @@ class PersonDetectorYOLO:
         confs = res.boxes.conf.cpu().numpy()
 
         dets: List[Det] = []
-        for (x1, y1, x2, y2), c in zip(xyxy, confs):
+        for (x1, y1, x2, y2), c in zip(xyxy, confs, strict=True):
             dets.append(Det((float(x1), float(y1), float(x2), float(y2)), float(c)))
         return dets
 
     def _tile_coords(self, W: int, H: int) -> List[Tuple[int, int, int, int]]:
-        ts = self.tile_size
-        ov = max(0.0, min(0.5, self.tile_overlap))
-        step = max(1, int(round(ts * (1.0 - ov))))
-
-        xs = list(range(0, max(1, W - ts + 1), step))
-        ys = list(range(0, max(1, H - ts + 1), step))
-
-        # ensure right/bottom coverage
-        if len(xs) == 0:
-            xs = [0]
-        if len(ys) == 0:
-            ys = [0]
-        if xs[-1] != max(0, W - ts):
-            xs.append(max(0, W - ts))
-        if ys[-1] != max(0, H - ts):
-            ys.append(max(0, H - ts))
-
-        coords: List[Tuple[int, int, int, int]] = []
-        for y0 in ys:
-            for x0 in xs:
-                x1 = x0
-                y1 = y0
-                x2 = min(W, x0 + ts)
-                y2 = min(H, y0 + ts)
-                coords.append((x1, y1, x2, y2))
-        return coords
+        return tile_coords(W, H, self.tile_size, self.tile_overlap)
 
     def _predict_tiled(self, frame_bgr: np.ndarray) -> List[Det]:
         H, W = frame_bgr.shape[:2]
@@ -173,7 +170,7 @@ class PersonDetectorYOLO:
         all_boxes: List[Tuple[float, float, float, float]] = []
         all_scores: List[float] = []
 
-        for (x1, y1, x2, y2) in coords:
+        for x1, y1, x2, y2 in coords:
             tile = frame_bgr[y1:y2, x1:x2]
             dets = self._predict(tile, conf=self.small_conf, imgsz=self.small_imgsz)
 

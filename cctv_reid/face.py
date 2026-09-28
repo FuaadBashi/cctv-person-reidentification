@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple, Dict
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -26,7 +26,9 @@ class InsightFaceModule:
         out: List[FaceDet] = []
         for f in faces:
             x1, y1, x2, y2 = [float(v) for v in f.bbox.tolist()]
-            out.append(FaceDet(bbox_xyxy=(x1, y1, x2, y2), embedding=f.embedding.astype(np.float32)))
+            out.append(
+                FaceDet(bbox_xyxy=(x1, y1, x2, y2), embedding=f.embedding.astype(np.float32))
+            )
         return out
 
     @staticmethod

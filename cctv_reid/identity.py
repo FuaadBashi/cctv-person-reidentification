@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 
 
@@ -93,7 +94,8 @@ class IdentityManager:
     Matching logic:
       1) If TID already has a GID -> keep it ("existing")
       2) If face embedding available -> face match if dist <= face_thresh
-      3) Else body embedding -> body match if dist <= body_thresh AND (second-best - best) >= body_margin
+      3) Else body embedding -> body match if dist <= body_thresh
+         AND (second-best - best) >= body_margin
       4) Else create new GID
     """
 
@@ -103,7 +105,8 @@ class IdentityManager:
         face_thresh: Optional[float] = None,
         body_thresh: Optional[float] = None,
         body_margin: float = 0.0,
-        face_latch_frames: int = 0,  # kept for config compatibility; latch is handled in pipeline UI
+        # Kept for config compatibility; the latch is handled in the pipeline UI.
+        face_latch_frames: int = 0,
         # Backward-compatible aliases (if older code calls these):
         face_dist_thresh: Optional[float] = None,
         body_dist_thresh: Optional[float] = None,

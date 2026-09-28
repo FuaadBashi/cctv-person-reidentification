@@ -4,22 +4,20 @@ import csv
 import json
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 from tqdm import tqdm
 
-from .visualize import to_gray_overlay, draw_box_with_label, gid_to_color, format_label
-from .config import PipelineConfig
-
-from .video_io import VideoReader, VideoWriter
-from .detector import PersonDetectorYOLO
-
-from .tracker import DeepSortTracker
-from .identity import IdentityGallery, IdentityManager
-from .face import InsightFaceModule, FaceDet
 from .body_reid import ResNetBodyReID
+from .config import PipelineConfig
+from .detector import PersonDetectorYOLO
+from .face import FaceDet, InsightFaceModule
+from .identity import IdentityGallery, IdentityManager
+from .tracker import DeepSortTracker
+from .video_io import VideoReader, VideoWriter
+from .visualize import draw_box_with_label, format_label, gid_to_color, to_gray_overlay
 
 
 def crop_xyxy(frame: np.ndarray, bbox_xyxy: Tuple[float, float, float, float]) -> np.ndarray:
@@ -120,7 +118,11 @@ class VideoReIDPipeline:
     def run(self) -> None:
         cfg = self.cfg
         vr = VideoReader(cfg.input_path)
-        vw = VideoWriter(self.annotated_path, fps=vr.fps / max(1, cfg.stride), size=(vr.width, vr.height))
+        vw = VideoWriter(
+            self.annotated_path,
+            fps=vr.fps / max(1, cfg.stride),
+            size=(vr.width, vr.height),
+        )
 
         pbar = tqdm(total=vr.frame_count, desc="Processing", unit="frame")
         alive_prev: set[int] = set()
@@ -153,7 +155,10 @@ class VideoReIDPipeline:
                 for tid in dead:
                     gid = self.id_manager.track_to_gid.get(tid)
                     if gid is not None:
-                        self._log_event("EXIT", {"frame": frame_idx, "track_id": tid, "global_id": gid})
+                        self._log_event(
+                            "EXIT",
+                            {"frame": frame_idx, "track_id": tid, "global_id": gid},
+                        )
                 alive_prev = current_alive
 
                 annotated = to_gray_overlay(frame.copy())
@@ -168,8 +173,12 @@ class VideoReIDPipeline:
 
                     # FACE latch (UI only): keep FACE for N frames after last detection
                     if face_emb is not None:
-                        self._face_latch_until[tid] = frame_idx + int(getattr(cfg, "face_latch_frames", 0))
-                    display_has_face = (face_emb is not None) or (frame_idx <= self._face_latch_until.get(tid, -1))
+                        self._face_latch_until[tid] = frame_idx + int(
+                            getattr(cfg, "face_latch_frames", 0)
+                        )
+                    display_has_face = (face_emb is not None) or (
+                        frame_idx <= self._face_latch_until.get(tid, -1)
+                    )
 
                     # Body embedding (optional, cached every body_every frames)
                     body_emb: Optional[np.ndarray] = None
@@ -242,7 +251,9 @@ class VideoReIDPipeline:
                         }
                     )
 
-                self.tracks_jsonl.write({"frame": frame_idx, "time_s": time_s, "tracks": per_frame_records})
+                self.tracks_jsonl.write(
+                    {"frame": frame_idx, "time_s": time_s, "tracks": per_frame_records}
+                )
                 vw.write(annotated)
 
                 if cfg.show:

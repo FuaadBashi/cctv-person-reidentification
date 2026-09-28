@@ -1,0 +1,14 @@
+[project]
+name = "cctv-reid"
+version = "0.1.0"
+description = "Single-camera person detection, tracking and re-identification."
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
